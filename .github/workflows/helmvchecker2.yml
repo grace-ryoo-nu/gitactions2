@@ -87,6 +87,62 @@ jobs:
         # Get changelog/notes if available
         helm show readme prometheus-community/prometheus --version $LATEST > chart-readme.md || echo "No readme available"
         
+    - name: Send Slack notification
+      if: steps.compare.outputs.update-available == 'true'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: custom
+        custom_payload: |
+          {
+            "text": "🚨 New Prometheus Helm Chart Update Available",
+            "attachments": [
+              {
+                "color": "${{ steps.compare.outputs.severity == 'HIGH' && 'danger' || steps.compare.outputs.severity == 'MEDIUM' && 'warning' || 'good' }}",
+                "fields": [
+                  {
+                    "title": "Current Version",
+                    "value": "${{ steps.current-version.outputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Latest Version",
+                    "value": "${{ steps.latest-version.outputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Severity",
+                    "value": "${{ steps.compare.outputs.severity }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Impact Reason",
+                    "value": "${{ steps.compare.outputs.severity-reason }}",
+                    "short": true
+                  },
+                  {
+                    "title": "App Version",
+                    "value": "${{ steps.chart-details.outputs.app-version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Repository",
+                    "value": "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>",
+                    "short": true
+                  }
+                ],
+                "actions": [
+                  {
+                    "type": "button",
+                    "text": "View Workflow",
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        
     - name: Update stored version
       if: steps.compare.outputs.update-available == 'true'
       run: |
