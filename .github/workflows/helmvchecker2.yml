@@ -1,0 +1,204 @@
+name: Prometheus Helm Chart Monitor
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  monitor-chart:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: 'latest'
+        
+    - name: Add Prometheus Community Helm repo
+      run: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
+        
+    - name: Get current chart version
+      id: current-version
+      run: |
+        if [ -f "chart-version.txt" ]; then
+          echo "version=$(cat chart-version.txt)" >> $GITHUB_OUTPUT
+        else
+          echo "version=0.0.0" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Get latest chart version
+      id: latest-version
+      run: |
+        LATEST=$(helm search repo prometheus-community/prometheus --version="" -o json | jq -r '.[0].version')
+        echo "version=$LATEST" >> $GITHUB_OUTPUT
+        
+    - name: Compare versions and assess impact
+      id: compare
+      run: |
+        CURRENT="${{ steps.current-version.outputs.version }}"
+        LATEST="${{ steps.latest-version.outputs.version }}"
+        
+        if [ "$CURRENT" != "$LATEST" ]; then
+          echo "update-available=true" >> $GITHUB_OUTPUT
+          
+          # Simple severity assessment based on version change
+          CURRENT_MAJOR=$(echo $CURRENT | cut -d. -f1)
+          LATEST_MAJOR=$(echo $LATEST | cut -d. -f1)
+          CURRENT_MINOR=$(echo $CURRENT | cut -d. -f2)
+          LATEST_MINOR=$(echo $LATEST | cut -d. -f2)
+          
+          if [ "$CURRENT_MAJOR" != "$LATEST_MAJOR" ]; then
+            echo "severity=HIGH" >> $GITHUB_OUTPUT
+            echo "severity-reason=Major version change" >> $GITHUB_OUTPUT
+          elif [ "$CURRENT_MINOR" != "$LATEST_MINOR" ]; then
+            echo "severity=MEDIUM" >> $GITHUB_OUTPUT
+            echo "severity-reason=Minor version change" >> $GITHUB_OUTPUT
+          else
+            echo "severity=LOW" >> $GITHUB_OUTPUT
+            echo "severity-reason=Patch version change" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "update-available=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Get chart details for comparison
+      if: steps.compare.outputs.update-available == 'true'
+      id: chart-details
+      run: |
+        CURRENT="${{ steps.current-version.outputs.version }}"
+        LATEST="${{ steps.latest-version.outputs.version }}"
+        
+        # Get chart info
+        helm show chart prometheus-community/prometheus --version $LATEST > latest-chart.yaml
+        
+        # Extract key information
+        APP_VERSION=$(grep "appVersion:" latest-chart.yaml | cut -d' ' -f2)
+        DESCRIPTION=$(grep "description:" latest-chart.yaml | cut -d' ' -f2-)
+        
+        echo "app-version=$APP_VERSION" >> $GITHUB_OUTPUT
+        echo "description=$DESCRIPTION" >> $GITHUB_OUTPUT
+        
+        # Get changelog/notes if available
+        helm show readme prometheus-community/prometheus --version $LATEST > chart-readme.md || echo "No readme available"
+        
+    - name: Send Slack notification
+      if: steps.compare.outputs.update-available == 'true'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: custom
+        custom_payload: |
+          {
+            "text": "🚨 New Prometheus Helm Chart Update Available",
+            "attachments": [
+              {
+                "color": "${{ steps.compare.outputs.severity == 'HIGH' && 'danger' || steps.compare.outputs.severity == 'MEDIUM' && 'warning' || 'good' }}",
+                "fields": [
+                  {
+                    "title": "Current Version",
+                    "value": "${{ steps.current-version.outputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Latest Version",
+                    "value": "${{ steps.latest-version.outputs.version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Severity",
+                    "value": "${{ steps.compare.outputs.severity }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Impact Reason",
+                    "value": "${{ steps.compare.outputs.severity-reason }}",
+                    "short": true
+                  },
+                  {
+                    "title": "App Version",
+                    "value": "${{ steps.chart-details.outputs.app-version }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Repository",
+                    "value": "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>",
+                    "short": true
+                  }
+                ],
+                "actions": [
+                  {
+                    "type": "button",
+                    "text": "View Workflow",
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        
+    - name: Update stored version
+      if: steps.compare.outputs.update-available == 'true'
+      run: |
+        echo "${{ steps.latest-version.outputs.version }}" > chart-version.txt
+        
+    - name: Commit version update
+      if: steps.compare.outputs.update-available == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add chart-version.txt
+        git commit -m "Update Prometheus chart version to ${{ steps.latest-version.outputs.version }}" || exit 0
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Create detailed comparison report
+      if: steps.compare.outputs.update-available == 'true'
+      run: |
+        echo "# Prometheus Helm Chart Update Report" > update-report.md
+        echo "" >> update-report.md
+        echo "## Version Comparison" >> update-report.md
+        echo "- **Previous Version**: ${{ steps.current-version.outputs.version }}" >> update-report.md
+        echo "- **New Version**: ${{ steps.latest-version.outputs.version }}" >> update-report.md
+        echo "- **Severity**: ${{ steps.compare.outputs.severity }}" >> update-report.md
+        echo "- **Impact**: ${{ steps.compare.outputs.severity-reason }}" >> update-report.md
+        echo "- **App Version**: ${{ steps.chart-details.outputs.app-version }}" >> update-report.md
+        echo "" >> update-report.md
+        echo "## Recommended Actions" >> update-report.md
+        
+        case "${{ steps.compare.outputs.severity }}" in
+          "HIGH")
+            echo "- 🔴 **IMMEDIATE ATTENTION REQUIRED**" >> update-report.md
+            echo "- Review breaking changes carefully" >> update-report.md
+            echo "- Test in development environment first" >> update-report.md
+            echo "- Plan maintenance window for upgrade" >> update-report.md
+            ;;
+          "MEDIUM")
+            echo "- 🟡 **SCHEDULED UPDATE RECOMMENDED**" >> update-report.md
+            echo "- Review new features and changes" >> update-report.md
+            echo "- Test in staging environment" >> update-report.md
+            echo "- Plan upgrade within next sprint" >> update-report.md
+            ;;
+          "LOW")
+            echo "- 🟢 **ROUTINE UPDATE**" >> update-report.md
+            echo "- Likely bug fixes or minor improvements" >> update-report.md
+            echo "- Safe to update during regular maintenance" >> update-report.md
+            ;;
+        esac
+        
+    - name: Upload comparison report
+      if: steps.compare.outputs.update-available == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: prometheus-chart-update-report
+        path: |
+          update-report.md
+          latest-chart.yaml
+          chart-readme.md
