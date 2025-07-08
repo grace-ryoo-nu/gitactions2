@@ -87,62 +87,6 @@ jobs:
         # Get changelog/notes if available
         helm show readme prometheus-community/prometheus --version $LATEST > chart-readme.md || echo "No readme available"
         
-    - name: Send Slack notification
-      if: steps.compare.outputs.update-available == 'true'
-      uses: 8398a7/action-slack@v3
-      with:
-        status: custom
-        custom_payload: |
-          {
-            "text": "🚨 New Prometheus Helm Chart Update Available",
-            "attachments": [
-              {
-                "color": "${{ steps.compare.outputs.severity == 'HIGH' && 'danger' || steps.compare.outputs.severity == 'MEDIUM' && 'warning' || 'good' }}",
-                "fields": [
-                  {
-                    "title": "Current Version",
-                    "value": "${{ steps.current-version.outputs.version }}",
-                    "short": true
-                  },
-                  {
-                    "title": "Latest Version",
-                    "value": "${{ steps.latest-version.outputs.version }}",
-                    "short": true
-                  },
-                  {
-                    "title": "Severity",
-                    "value": "${{ steps.compare.outputs.severity }}",
-                    "short": true
-                  },
-                  {
-                    "title": "Impact Reason",
-                    "value": "${{ steps.compare.outputs.severity-reason }}",
-                    "short": true
-                  },
-                  {
-                    "title": "App Version",
-                    "value": "${{ steps.chart-details.outputs.app-version }}",
-                    "short": true
-                  },
-                  {
-                    "title": "Repository",
-                    "value": "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>",
-                    "short": true
-                  }
-                ],
-                "actions": [
-                  {
-                    "type": "button",
-                    "text": "View Workflow",
-                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                  }
-                ]
-              }
-            ]
-          }
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        
     - name: Update stored version
       if: steps.compare.outputs.update-available == 'true'
       run: |
@@ -159,40 +103,6 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         
-    - name: Create detailed comparison report
-      if: steps.compare.outputs.update-available == 'true'
-      run: |
-        echo "# Prometheus Helm Chart Update Report" > update-report.md
-        echo "" >> update-report.md
-        echo "## Version Comparison" >> update-report.md
-        echo "- **Previous Version**: ${{ steps.current-version.outputs.version }}" >> update-report.md
-        echo "- **New Version**: ${{ steps.latest-version.outputs.version }}" >> update-report.md
-        echo "- **Severity**: ${{ steps.compare.outputs.severity }}" >> update-report.md
-        echo "- **Impact**: ${{ steps.compare.outputs.severity-reason }}" >> update-report.md
-        echo "- **App Version**: ${{ steps.chart-details.outputs.app-version }}" >> update-report.md
-        echo "" >> update-report.md
-        echo "## Recommended Actions" >> update-report.md
-        
-        case "${{ steps.compare.outputs.severity }}" in
-          "HIGH")
-            echo "- 🔴 **IMMEDIATE ATTENTION REQUIRED**" >> update-report.md
-            echo "- Review breaking changes carefully" >> update-report.md
-            echo "- Test in development environment first" >> update-report.md
-            echo "- Plan maintenance window for upgrade" >> update-report.md
-            ;;
-          "MEDIUM")
-            echo "- 🟡 **SCHEDULED UPDATE RECOMMENDED**" >> update-report.md
-            echo "- Review new features and changes" >> update-report.md
-            echo "- Test in staging environment" >> update-report.md
-            echo "- Plan upgrade within next sprint" >> update-report.md
-            ;;
-          "LOW")
-            echo "- 🟢 **ROUTINE UPDATE**" >> update-report.md
-            echo "- Likely bug fixes or minor improvements" >> update-report.md
-            echo "- Safe to update during regular maintenance" >> update-report.md
-            ;;
-        esac
-        
     - name: Upload comparison report
       if: steps.compare.outputs.update-available == 'true'
       uses: actions/upload-artifact@v4
@@ -201,4 +111,208 @@ jobs:
         path: |
           update-report.md
           latest-chart.yaml
-          chart-readme.md
+          chart-readme.md          - name: Create detailed comparison report with AI analysis
+            if: steps.compare.outputs.update-available == 'true'
+            id: ai-analysis
+            run: |
+              CURRENT="${{ steps.current-version.outputs.version }}"
+              LATEST="${{ steps.latest-version.outputs.version }}"
+              
+              # Get chart details for both versions
+              helm show chart prometheus-community/prometheus --version $CURRENT > current-chart.yaml 2>/dev/null || echo "No previous chart data"
+              helm show chart prometheus-community/prometheus --version $LATEST > latest-chart.yaml
+              helm show values prometheus-community/prometheus --version $CURRENT > current-values.yaml 2>/dev/null || echo "{}"
+              helm show values prometheus-community/prometheus --version $LATEST > latest-values.yaml
+              helm show readme prometheus-community/prometheus --version $LATEST > chart-readme.md 2>/dev/null || echo "No readme"
+              
+              # Prepare data for ChatGPT analysis
+              cat > analysis-prompt.txt << 'EOF'
+              You are a Kubernetes and Helm expert. Analyze the following Prometheus Helm chart update and provide a structured assessment.
+      
+              Previous Version: $CURRENT
+              New Version: $LATEST
+      
+              Chart Metadata Changes:
+              EOF
+              
+              echo "=== CURRENT CHART ===" >> analysis-prompt.txt
+              cat current-chart.yaml >> analysis-prompt.txt
+              echo "" >> analysis-prompt.txt
+              echo "=== LATEST CHART ===" >> analysis-prompt.txt
+              cat latest-chart.yaml >> analysis-prompt.txt
+              echo "" >> analysis-prompt.txt
+              
+              echo "Values Changes:" >> analysis-prompt.txt
+              echo "=== CURRENT VALUES ===" >> analysis-prompt.txt
+              head -50 current-values.yaml >> analysis-prompt.txt
+              echo "" >> analysis-prompt.txt
+              echo "=== LATEST VALUES ===" >> analysis-prompt.txt
+              head -50 latest-values.yaml >> analysis-prompt.txt
+              echo "" >> analysis-prompt.txt
+              
+              cat >> analysis-prompt.txt << 'EOF'
+              
+              Please provide a JSON response with the following structure:
+              {
+                "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+                "summary": "Brief summary of changes",
+                "breaking_changes": ["list of breaking changes"],
+                "new_features": ["list of new features"],
+                "security_impact": "description of security implications",
+                "upgrade_complexity": "SIMPLE|MODERATE|COMPLEX",
+                "recommendations": ["list of specific recommendations"],
+                "testing_requirements": ["list of testing requirements"]
+              }
+              EOF
+              
+              # Call OpenAI API
+              RESPONSE=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${{ secrets.OPENAI_API_KEY }}" \
+                -d '{
+                  "model": "gpt-4",
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": "You are a Kubernetes and Helm expert specializing in Prometheus deployments. Analyze chart updates and provide structured assessments."
+                    },
+                    {
+                      "role": "user",
+                      "content": "'"$(cat analysis-prompt.txt | sed 's/"/\\"/g' | tr '\n' ' ')"'"
+                    }
+                  ],
+                  "max_tokens": 2000,
+                  "temperature": 0.1
+                }')
+              
+              # Extract JSON response
+              AI_ANALYSIS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+              
+              # Parse AI response
+              AI_SEVERITY=$(echo "$AI_ANALYSIS" | jq -r '.severity // "UNKNOWN"')
+              AI_SUMMARY=$(echo "$AI_ANALYSIS" | jq -r '.summary // "No summary available"')
+              AI_BREAKING_CHANGES=$(echo "$AI_ANALYSIS" | jq -r '.breaking_changes // [] | join(", ")')
+              AI_NEW_FEATURES=$(echo "$AI_ANALYSIS" | jq -r '.new_features // [] | join(", ")')
+              AI_SECURITY_IMPACT=$(echo "$AI_ANALYSIS" | jq -r '.security_impact // "No security impact identified"')
+              AI_UPGRADE_COMPLEXITY=$(echo "$AI_ANALYSIS" | jq -r '.upgrade_complexity // "UNKNOWN"')
+              AI_RECOMMENDATIONS=$(echo "$AI_ANALYSIS" | jq -r '.recommendations // [] | join("\n- ")')
+              AI_TESTING_REQUIREMENTS=$(echo "$AI_ANALYSIS" | jq -r '.testing_requirements // [] | join("\n- ")')
+              
+              # Create enhanced report
+              echo "# Prometheus Helm Chart Update Report (AI Analysis)" > update-report.md
+              echo "Generated on: $(date)" >> update-report.md
+              echo "" >> update-report.md
+              
+              echo "## AI Analysis Summary" >> update-report.md
+              echo "$AI_SUMMARY" >> update-report.md
+              echo "" >> update-report.md
+              
+              echo "## Version Comparison" >> update-report.md
+              echo "- **Previous Version**: $CURRENT" >> update-report.md
+              echo "- **New Version**: $LATEST" >> update-report.md
+              echo "- **AI Assessed Severity**: $AI_SEVERITY" >> update-report.md
+              echo "- **Upgrade Complexity**: $AI_UPGRADE_COMPLEXITY" >> update-report.md
+              echo "- **App Version**: ${{ steps.chart-details.outputs.app-version }}" >> update-report.md
+              echo "" >> update-report.md
+              
+              if [ "$AI_BREAKING_CHANGES" != "" ]; then
+                echo "## Breaking Changes" >> update-report.md
+                echo "$AI_BREAKING_CHANGES" >> update-report.md
+                echo "" >> update-report.md
+              fi
+              
+              if [ "$AI_NEW_FEATURES" != "" ]; then
+                echo "## New Features" >> update-report.md
+                echo "$AI_NEW_FEATURES" >> update-report.md
+                echo "" >> update-report.md
+              fi
+              
+              echo "## Security Impact" >> update-report.md
+              echo "$AI_SECURITY_IMPACT" >> update-report.md
+              echo "" >> update-report.md
+              
+              echo "## AI Recommendations" >> update-report.md
+              echo "- $AI_RECOMMENDATIONS" >> update-report.md
+              echo "" >> update-report.md
+              
+              echo "## Testing Requirements" >> update-report.md
+              echo "- $AI_TESTING_REQUIREMENTS" >> update-report.md
+              echo "" >> update-report.md
+              
+              # Set outputs for Slack notification
+              echo "ai-severity=$AI_SEVERITY" >> $GITHUB_OUTPUT
+              echo "ai-summary=$AI_SUMMARY" >> $GITHUB_OUTPUT
+              echo "ai-breaking-changes=$AI_BREAKING_CHANGES" >> $GITHUB_OUTPUT
+              echo "ai-recommendations=$AI_RECOMMENDATIONS" >> $GITHUB_OUTPUT
+              echo "upgrade-complexity=$AI_UPGRADE_COMPLEXITY" >> $GITHUB_OUTPUT
+              
+              # Store full analysis for Slack
+              echo "ai-analysis<<EOF" >> $GITHUB_OUTPUT
+              echo "$AI_ANALYSIS" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+      
+          - name: Send enhanced Slack notification with AI analysis
+            if: steps.compare.outputs.update-available == 'true'
+            uses: 8398a7/action-slack@v3
+            with:
+              status: custom
+              custom_payload: |
+                {
+                  "text": "🤖 AI-Analyzed Prometheus Helm Chart Update",
+                  "attachments": [
+                    {
+                      "color": "${{ steps.ai-analysis.outputs.ai-severity == 'CRITICAL' && 'danger' || steps.ai-analysis.outputs.ai-severity == 'HIGH' && 'danger' || steps.ai-analysis.outputs.ai-severity == 'MEDIUM' && 'warning' || 'good' }}",
+                      "fields": [
+                        {
+                          "title": "Version Update",
+                          "value": "${{ steps.current-version.outputs.version }} → ${{ steps.latest-version.outputs.version }}",
+                          "short": true
+                        },
+                        {
+                          "title": "AI Severity",
+                          "value": "${{ steps.ai-analysis.outputs.ai-severity }}",
+                          "short": true
+                        },
+                        {
+                          "title": "Upgrade Complexity",
+                          "value": "${{ steps.ai-analysis.outputs.upgrade-complexity }}",
+                          "short": true
+                        },
+                        {
+                          "title": "App Version",
+                          "value": "${{ steps.chart-details.outputs.app-version }}",
+                          "short": true
+                        },
+                        {
+                          "title": "AI Summary",
+                          "value": "${{ steps.ai-analysis.outputs.ai-summary }}",
+                          "short": false
+                        },
+                        {
+                          "title": "Breaking Changes",
+                          "value": "${{ steps.ai-analysis.outputs.ai-breaking-changes || 'None detected' }}",
+                          "short": false
+                        },
+                        {
+                          "title": "Key Recommendations",
+                          "value": "${{ steps.ai-analysis.outputs.ai-recommendations }}",
+                          "short": false
+                        }
+                      ],
+                      "actions": [
+                        {
+                          "type": "button",
+                          "text": "View Full Analysis",
+                          "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                        },
+                        {
+                          "type": "button",
+                          "text": "Download Report",
+                          "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts"
+                        }
+                      ]
+                    }
+                  ]
+                }
+            env:
+              SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
