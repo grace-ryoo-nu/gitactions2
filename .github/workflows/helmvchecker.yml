@@ -1,9 +1,9 @@
 name: Check Prometheus Helm Chart Version
 
-on:
-  schedule:
-    - cron: '0 9 * * 1'  # Every Monday 9 AM UTC
-  workflow_dispatch:
+on: [push]
+  #schedule:
+   # - cron: '0 9 * * 1'  # Every Monday 9 AM UTC
+  #workflow_dispatch:
 
 permissions:
   contents: read
