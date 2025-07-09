@@ -1,9 +1,9 @@
 name: Prometheus Helm Chart Monitor
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Run every 6 hours
-  workflow_dispatch:  # Allow manual trigger
+on: [push]
+  # schedule:
+    # - cron: '0 */6 * * *'  # Run every 6 hours
+  # workflow_dispatch:  # Allow manual trigger
 
 jobs:
   monitor-chart:
